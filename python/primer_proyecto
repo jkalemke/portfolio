@@ -1,0 +1,793 @@
+#!/usr/bin/env python3
+
+# -*- coding: utf-8 -*-
+
+"""
+
+Sistema de Inventario en SQLite con menú en terminal.
+
+
+
+Requisitos cubiertos:
+
+- Base de datos inventario.db con tabla productos (id, nombre, descripcion, cantidad, precio, categoria).
+
+- CRUD: crear, leer, actualizar, eliminar por ID.
+
+- Búsqueda por ID (y opcional por nombre/categoría).
+
+- Reporte de bajo stock por límite especificado.
+
+- Interfaz por terminal con menú.
+
+- Código modular con funciones y comentarios.
+
+- Uso opcional de colorama para mejorar legibilidad.
+
+"""
+
+
+
+import sqlite3
+
+from typing import Optional, List, Tuple
+
+
+
+# Intento de import de colorama; si no está, se usan strings vacíos
+
+try:
+
+    from colorama import init, Fore, Style
+
+    init(autoreset=True)
+
+    COLOR_OK = Fore.GREEN + Style.BRIGHT
+
+    COLOR_WARN = Fore.YELLOW + Style.BRIGHT
+
+    COLOR_ERR = Fore.RED + Style.BRIGHT
+
+    COLOR_INFO = Fore.CYAN + Style.BRIGHT
+
+    COLOR_MENU = Fore.MAGENTA + Style.BRIGHT
+
+    RESET = Style.RESET_ALL
+
+except ImportError:
+
+    COLOR_OK = COLOR_WARN = COLOR_ERR = COLOR_INFO = COLOR_MENU = RESET = ""
+
+
+
+DB_NAME = "inventario.db"
+
+
+
+# ---------- Capa de acceso a datos (SQLite) ----------
+
+
+
+def obtener_conexion() -> sqlite3.Connection:
+
+    """
+
+    Devuelve una conexión a la base de datos SQLite.
+
+    - habilita foreign keys por buenas prácticas (aunque no se usan aquí).
+
+    - row_factory a sqlite3.Row para acceder por nombre de columna.
+
+    """
+
+    conn = sqlite3.connect(DB_NAME)
+
+    conn.execute("PRAGMA foreign_keys = ON;")
+
+    conn.row_factory = sqlite3.Row
+
+    return conn
+
+
+
+
+
+def inicializar_db() -> None:
+
+    """
+
+    Crea la tabla 'productos' si no existe.
+
+    - id: INTEGER PRIMARY KEY AUTOINCREMENT
+
+    - nombre: TEXT NOT NULL
+
+    - descripcion: TEXT
+
+    - cantidad: INTEGER NOT NULL
+
+    - precio: REAL NOT NULL
+
+    - categoria: TEXT
+
+    """
+
+    with obtener_conexion() as conn:
+
+        conn.execute(
+
+            """
+
+            CREATE TABLE IF NOT EXISTS productos (
+
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                nombre TEXT NOT NULL,
+
+                descripcion TEXT,
+
+                cantidad INTEGER NOT NULL,
+
+                precio REAL NOT NULL,
+
+                categoria TEXT
+
+            );
+
+            """
+
+        )
+
+        conn.commit()
+
+
+
+
+
+def insertar_producto(nombre: str, descripcion: Optional[str], cantidad: int, precio: float, categoria: Optional[str]) -> int:
+
+    """
+
+    Inserta un nuevo producto y retorna el ID generado.
+
+    Usa parámetros para evitar inyección SQL.
+
+    """
+
+    with obtener_conexion() as conn:
+
+        cur = conn.execute(
+
+            """
+
+            INSERT INTO productos (nombre, descripcion, cantidad, precio, categoria)
+
+            VALUES (?, ?, ?, ?, ?);
+
+            """,
+
+            (nombre.strip(), (descripcion or "").strip(), cantidad, precio, (categoria or "").strip()),
+
+        )
+
+        conn.commit()
+
+        return cur.lastrowid
+
+
+
+
+
+def listar_productos() -> List[sqlite3.Row]:
+
+    """Retorna todos los productos."""
+
+    with obtener_conexion() as conn:
+
+        cur = conn.execute("SELECT * FROM productos ORDER BY id;")
+
+        return cur.fetchall()
+
+
+
+
+
+def obtener_producto_por_id(prod_id: int) -> Optional[sqlite3.Row]:
+
+    """Retorna un producto por su ID, o None si no existe."""
+
+    with obtener_conexion() as conn:
+
+        cur = conn.execute("SELECT * FROM productos WHERE id = ?;", (prod_id,))
+
+        return cur.fetchone()
+
+
+
+
+
+def actualizar_producto(prod_id: int, nombre: str, descripcion: Optional[str], cantidad: int, precio: float, categoria: Optional[str]) -> bool:
+
+    """
+
+    Actualiza un producto por ID. Retorna True si se actualizó, False si no existe.
+
+    """
+
+    with obtener_conexion() as conn:
+
+        cur = conn.execute(
+
+            """
+
+            UPDATE productos
+
+            SET nombre = ?, descripcion = ?, cantidad = ?, precio = ?, categoria = ?
+
+            WHERE id = ?;
+
+            """,
+
+            (nombre.strip(), (descripcion or "").strip(), cantidad, precio, (categoria or "").strip(), prod_id),
+
+        )
+
+        conn.commit()
+
+        return cur.rowcount > 0
+
+
+
+
+
+def eliminar_producto(prod_id: int) -> bool:
+
+    """Elimina un producto por ID. Retorna True si se eliminó, False si no existe."""
+
+    with obtener_conexion() as conn:
+
+        cur = conn.execute("DELETE FROM productos WHERE id = ?;", (prod_id,))
+
+        conn.commit()
+
+        return cur.rowcount > 0
+
+
+
+
+
+def buscar_por_nombre_categoria(nombre: Optional[str] = None, categoria: Optional[str] = None) -> List[sqlite3.Row]:
+
+    """
+
+    Búsqueda opcional por nombre y/o categoría.
+
+    - Busca usando LIKE para coincidencias parciales (case-insensitive básico con LOWER).
+
+    """
+
+    nombre = (nombre or "").strip()
+
+    categoria = (categoria or "").strip()
+
+
+
+    query = "SELECT * FROM productos WHERE 1=1"
+
+    params: List[str] = []
+
+
+
+    if nombre:
+
+        query += " AND LOWER(nombre) LIKE ?"
+
+        params.append(f"%{nombre.lower()}%")
+
+
+
+    if categoria:
+
+        query += " AND LOWER(categoria) LIKE ?"
+
+        params.append(f"%{categoria.lower()}%")
+
+
+
+    query += " ORDER BY id;"
+
+
+
+    with obtener_conexion() as conn:
+
+        cur = conn.execute(query, params)
+
+        return cur.fetchall()
+
+
+
+
+
+def reporte_bajo_stock(limite: int) -> List[sqlite3.Row]:
+
+    """Retorna productos con cantidad <= límite."""
+
+    with obtener_conexion() as conn:
+
+        cur = conn.execute(
+
+            "SELECT * FROM productos WHERE cantidad <= ? ORDER BY cantidad ASC, id ASC;",
+
+            (limite,),
+
+        )
+
+        return cur.fetchall()
+
+
+
+# ---------- Utilidades de validación y formato ----------
+
+
+
+def input_no_vacio(prompt: str) -> str:
+
+    """
+
+    Solicita un texto no vacío. Repite hasta que sea válido.
+
+    """
+
+    while True:
+
+        valor = input(prompt).strip()
+
+        if valor:
+
+            return valor
+
+        print(COLOR_WARN + "El valor no puede estar vacío." + RESET)
+
+
+
+
+
+def input_entero(prompt: str, minimo: Optional[int] = None) -> int:
+
+    """
+
+    Solicita un entero, con validación opcional de mínimo.
+
+    """
+
+    while True:
+
+        valor = input(prompt).strip()
+
+        try:
+
+            n = int(valor)
+
+            if minimo is not None and n < minimo:
+
+                print(COLOR_WARN + f"Debe ser un entero >= {minimo}." + RESET)
+
+                continue
+
+            return n
+
+        except ValueError:
+
+            print(COLOR_ERR + "Entrada inválida. Ingrese un número entero." + RESET)
+
+
+
+
+
+def input_flotante(prompt: str, minimo: Optional[float] = None) -> float:
+
+    """
+
+    Solicita un flotante, con validación opcional de mínimo.
+
+    """
+
+    while True:
+
+        valor = input(prompt).strip()
+
+        try:
+
+            n = float(valor)
+
+            if minimo is not None and n < minimo:
+
+                print(COLOR_WARN + f"Debe ser un número >= {minimo}." + RESET)
+
+                continue
+
+            return n
+
+        except ValueError:
+
+            print(COLOR_ERR + "Entrada inválida. Ingrese un número (puede tener decimales)." + RESET)
+
+
+
+
+
+def imprimir_producto(row: sqlite3.Row) -> None:
+
+    """
+
+    Muestra un producto en formato legible.
+
+    """
+
+    print(
+
+        f"{COLOR_INFO}ID:{RESET} {row['id']} | "
+
+        f"{COLOR_INFO}Nombre:{RESET} {row['nombre']} | "
+
+        f"{COLOR_INFO}Desc.:{RESET} {row['descripcion'] or '-'} | "
+
+        f"{COLOR_INFO}Cant.:{RESET} {row['cantidad']} | "
+
+        f"{COLOR_INFO}Precio:{RESET} {row['precio']:.2f} | "
+
+        f"{COLOR_INFO}Categoría:{RESET} {row['categoria'] or '-'}"
+
+    )
+
+
+
+
+
+def imprimir_lista(rows: List[sqlite3.Row]) -> None:
+
+    """
+
+    Muestra una lista de productos. Si está vacía, avisa.
+
+    """
+
+    if not rows:
+
+        print(COLOR_WARN + "No hay datos para mostrar." + RESET)
+
+        return
+
+    for r in rows:
+
+        imprimir_producto(r)
+
+
+
+# ---------- Funciones de interfaz (menú) ----------
+
+
+
+def opcion_registrar() -> None:
+
+    """Registrar un nuevo producto."""
+
+    print(COLOR_MENU + "\nRegistrar nuevo producto" + RESET)
+
+    nombre = input_no_vacio("Nombre: ")
+
+    descripcion = input("Descripción (opcional): ").strip()
+
+    cantidad = input_entero("Cantidad (entero, >= 0): ", minimo=0)
+
+    precio = input_flotante("Precio (>= 0): ", minimo=0.0)
+
+    categoria = input("Categoría (opcional): ").strip()
+
+
+
+    prod_id = insertar_producto(nombre, descripcion, cantidad, precio, categoria)
+
+    print(COLOR_OK + f"Producto registrado con ID: {prod_id}" + RESET)
+
+
+
+
+
+def opcion_listar() -> None:
+
+    """Visualizar productos."""
+
+    print(COLOR_MENU + "\nListado de productos" + RESET)
+
+    rows = listar_productos()
+
+    imprimir_lista(rows)
+
+
+
+
+
+def opcion_buscar_por_id() -> None:
+
+    """Búsqueda de producto por ID."""
+
+    print(COLOR_MENU + "\nBuscar producto por ID" + RESET)
+
+    prod_id = input_entero("ID: ", minimo=1)
+
+    row = obtener_producto_por_id(prod_id)
+
+    if row:
+
+        imprimir_producto(row)
+
+    else:
+
+        print(COLOR_WARN + "No se encontró un producto con ese ID." + RESET)
+
+
+
+
+
+def opcion_actualizar() -> None:
+
+    """Actualizar producto por ID."""
+
+    print(COLOR_MENU + "\nActualizar producto" + RESET)
+
+    prod_id = input_entero("ID del producto a actualizar: ", minimo=1)
+
+    existente = obtener_producto_por_id(prod_id)
+
+    if not existente:
+
+        print(COLOR_ERR + "No existe un producto con ese ID." + RESET)
+
+        return
+
+
+
+    print(COLOR_INFO + "Valores actuales (deje vacío para mantener):" + RESET)
+
+    imprimir_producto(existente)
+
+
+
+    # Permitir mantener valores actuales si se ingresa vacío
+
+    nombre = input(f"Nombre [{existente['nombre']}]: ").strip() or existente["nombre"]
+
+    descripcion = input(f"Descripción [{existente['descripcion'] or ''}]: ").strip() or (existente["descripcion"] or "")
+
+    categoria = input(f"Categoría [{existente['categoria'] or ''}]: ").strip() or (existente["categoria"] or "")
+
+
+
+    # Para cantidad y precio, usar validaciones
+
+    cantidad_str = input(f"Cantidad [{existente['cantidad']}]: ").strip()
+
+    if cantidad_str == "":
+
+        cantidad = existente["cantidad"]
+
+    else:
+
+        try:
+
+            cantidad = int(cantidad_str)
+
+            if cantidad < 0:
+
+                print(COLOR_ERR + "La cantidad no puede ser negativa." + RESET)
+
+                return
+
+        except ValueError:
+
+            print(COLOR_ERR + "Cantidad inválida." + RESET)
+
+            return
+
+
+
+    precio_str = input(f"Precio [{existente['precio']:.2f}]: ").strip()
+
+    if precio_str == "":
+
+        precio = existente["precio"]
+
+    else:
+
+        try:
+
+            precio = float(precio_str)
+
+            if precio < 0:
+
+                print(COLOR_ERR + "El precio no puede ser negativo." + RESET)
+
+                return
+
+        except ValueError:
+
+            print(COLOR_ERR + "Precio inválido." + RESET)
+
+            return
+
+
+
+    ok = actualizar_producto(prod_id, nombre, descripcion, cantidad, precio, categoria)
+
+    if ok:
+
+        print(COLOR_OK + "Producto actualizado correctamente." + RESET)
+
+    else:
+
+        print(COLOR_ERR + "No se pudo actualizar el producto." + RESET)
+
+
+
+
+
+def opcion_eliminar() -> None:
+
+    """Eliminar producto por ID."""
+
+    print(COLOR_MENU + "\nEliminar producto" + RESET)
+
+    prod_id = input_entero("ID del producto a eliminar: ", minimo=1)
+
+    confirmar = input(f"Confirma eliminar ID {prod_id}? (s/n): ").strip().lower()
+
+    if confirmar != "s":
+
+        print(COLOR_WARN + "Operación cancelada." + RESET)
+
+        return
+
+    ok = eliminar_producto(prod_id)
+
+    if ok:
+
+        print(COLOR_OK + "Producto eliminado." + RESET)
+
+    else:
+
+        print(COLOR_ERR + "No existe un producto con ese ID." + RESET)
+
+
+
+
+
+def opcion_buscar_avanzada() -> None:
+
+    """Búsqueda opcional por nombre y/o categoría."""
+
+    print(COLOR_MENU + "\nBúsqueda por nombre/categoría" + RESET)
+
+    nombre = input("Nombre (parcial, opcional): ").strip()
+
+    categoria = input("Categoría (parcial, opcional): ").strip()
+
+    rows = buscar_por_nombre_categoria(nombre=nombre or None, categoria=categoria or None)
+
+    imprimir_lista(rows)
+
+
+
+
+
+def opcion_reporte_bajo_stock() -> None:
+
+    """Reporte de productos con cantidad <= límite."""
+
+    print(COLOR_MENU + "\nReporte de bajo stock" + RESET)
+
+    limite = input_entero("Límite de cantidad (entero, >= 0): ", minimo=0)
+
+    rows = reporte_bajo_stock(limite)
+
+    if not rows:
+
+        print(COLOR_OK + "No hay productos con cantidad igual o inferior al límite." + RESET)
+
+        return
+
+    print(COLOR_INFO + f"Productos con cantidad <= {limite}:" + RESET)
+
+    imprimir_lista(rows)
+
+
+
+
+
+def mostrar_menu() -> None:
+
+    """Imprime el menú principal."""
+
+    print(COLOR_MENU + "\n----- Menú de Inventario -----" + RESET)
+
+    print("1) Registrar nuevo producto")
+
+    print("2) Listar productos")
+
+    print("3) Buscar producto por ID")
+
+    print("4) Actualizar producto por ID")
+
+    print("5) Eliminar producto por ID")
+
+    print("6) Búsqueda por nombre/categoría (opcional)")
+
+    print("7) Reporte de bajo stock")
+
+    print("0) Salir")
+
+
+
+
+
+def bucle_principal() -> None:
+
+    """Loop principal de la aplicación."""
+
+    inicializar_db()
+
+    print(COLOR_INFO + "Base de datos lista: inventario.db" + RESET)
+
+
+
+    while True:
+
+        mostrar_menu()
+
+        opcion = input("Seleccione una opción: ").strip()
+
+        if opcion == "1":
+
+            opcion_registrar()
+
+        elif opcion == "2":
+
+            opcion_listar()
+
+        elif opcion == "3":
+
+            opcion_buscar_por_id()
+
+        elif opcion == "4":
+
+            opcion_actualizar()
+
+        elif opcion == "5":
+
+            opcion_eliminar()
+
+        elif opcion == "6":
+
+            opcion_buscar_avanzada()
+
+        elif opcion == "7":
+
+            opcion_reporte_bajo_stock()
+
+        elif opcion == "0":
+
+            print(COLOR_OK + "Saliendo... ¡Hasta luego!" + RESET)
+
+            break
+
+        else:
+
+            print(COLOR_ERR + "Opción inválida. Intente nuevamente." + RESET)
+
+
+
+
+
+if __name__ == "__main__":
+
+    bucle_principal()
